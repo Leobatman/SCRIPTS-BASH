@@ -1,0 +1,549 @@
+#!/bin/bash
+
+# =============================================================================
+# SCRIPT: ANALISER_FORENSE_LOG - Ferramenta Profissional de Análise Forense
+# LOCALIZAÇÃO: /analiser_forense_log
+# DESCRIÇÃO: Análise forense avançada de logs de acesso para investigação de segurança
+# VERSÃO: 1.0
+# AUTOR: LEONARDO PEREIRA 
+# =============================================================================
+
+# Configurações globais
+readonly LOG_FILE="/access_log"
+readonly TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+readonly OUTPUT_DIR="/forensic_analysis_$TIMESTAMP"
+readonly REPORT_FILE="${OUTPUT_DIR}/security_analysis_report_$TIMESTAMP.txt"
+readonly EVIDENCE_DIR="${OUTPUT_DIR}/evidence"
+readonly STATS_DIR="${OUTPUT_DIR}/statistics"
+readonly THREAT_INTEL_DIR="${OUTPUT_DIR}/threat_intelligence"
+
+# Cores para output (Professional Color Scheme)
+readonly RED='\033[0;91m'
+readonly GREEN='\033[0;92m'
+readonly YELLOW='\033[0;93m'
+readonly BLUE='\033[0;94m'
+readonly PURPLE='\033[0;95m'
+readonly CYAN='\033[0;96m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m'
+readonly DIVIDER="=============================================================="
+
+# Listas de indicadores de comprometimento (IOCs)
+readonly SQL_KEYWORDS=("union" "select" "insert" "delete" "drop" "exec" "xp_" "'or'" "'or 1=1" "1=1" "--")
+readonly XSS_PATTERNS=("<script>" "alert(" "onerror=" "onload=" "eval(" "javascript:" "fromCharCode")
+readonly LFI_INDICATORS=("etc/passwd" "proc/self" "/../" "..\\" "etc/shadow" "boot.ini" "win.ini")
+readonly RCE_INDICATORS=("cmd.exe" "/bin/bash" "/bin/sh" "whoami" "id" "uname" "eval(" "system(" "exec(")
+readonly SCANNER_AGENTS=("nmap" "sqlmap" "nikto" "metasploit" "burpsuite" "acunetix" "nessus" "w3af" "zap")
+readonly MALICIOUS_PATHS=("admin" "wp-admin" "administrator" "login" "config" "env" ".env" "backup" "phpmyadmin")
+
+# Variáveis de estado
+declare -gA THREAT_LEVELS=([CRITICAL]=0 [HIGH]=0 [MEDIUM]=0 [LOW]=0)
+declare -gA ATTACK_VECTORS=([SQLi]=0 [XSS]=0 [LFI]=0 [RCE]=0 [SCANNING]=0 [AUTH_BYPASS]=0)
+declare -gA TOP_OFFENDERS
+declare -gA SUSPICIOUS_IPS
+
+# =============================================================================
+# FUNÇÕES DE LOGGING E OUTPUT 
+# =============================================================================
+
+log_message() {
+    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "${REPORT_FILE}"
+}
+
+log_section() {
+    echo -e "\n${PURPLE}${BOLD}$1${NC}" | tee -a "${REPORT_FILE}"
+    echo -e "${PURPLE}$DIVIDER${NC}" | tee -a "${REPORT_FILE}"
+}
+
+log_subsection() {
+    echo -e "\n${CYAN}${BOLD}$1${NC}" | tee -a "${REPORT_FILE}"
+}
+
+log_critical() {
+    echo -e "${RED}${BOLD}[CRÍTICO]${NC} $1" | tee -a "${REPORT_FILE}"
+    ((THREAT_LEVELS[CRITICAL]++))
+}
+
+log_high() {
+    echo -e "${RED}[ALTO]${NC} $1" | tee -a "${REPORT_FILE}"
+    ((THREAT_LEVELS[HIGH]++))
+}
+
+log_medium() {
+    echo -e "${YELLOW}[MÉDIO]${NC} $1" | tee -a "${REPORT_FILE}"
+    ((THREAT_LEVELS[MEDIUM]++))
+}
+
+log_low() {
+    echo -e "${GREEN}[BAIXO]${NC} $1" | tee -a "${REPORT_FILE}"
+    ((THREAT_LEVELS[LOW]++))
+}
+
+log_success() {
+    echo -e "${GREEN}${BOLD}[SUCESSO]${NC} $1" | tee -a "${REPORT_FILE}"
+}
+
+# =============================================================================
+# FUNÇÕES DE VALIDAÇÃO E CONFIGURAÇÃO
+# =============================================================================
+
+validate_environment() {
+    log_section "VALIDAÇÃO DO AMBIENTE"
+    
+    # Verificar se é root
+    if [[ $EUID -eq 0 ]]; then
+        log_success "Executando com privilégios de root"
+    else
+        log_medium "Executando sem privilégios de root - algumas análises podem ser limitadas"
+    fi
+
+    # Verificar se o arquivo de log existe
+    if [[ ! -f "$LOG_FILE" ]]; then
+        log_critical "Arquivo $LOG_FILE não encontrado!"
+        exit 1
+    fi
+    
+    # Verificar permissões de leitura
+    if [[ ! -r "$LOG_FILE" ]]; then
+        log_critical "Sem permissão para ler o arquivo $LOG_FILE"
+        exit 1
+    fi
+    
+    log_success "Arquivo de log validado: $LOG_FILE"
+}
+
+setup_analysis_environment() {
+    log_section "CONFIGURAÇÃO DO AMBIENTE DE ANÁLISE"
+    
+    # Criar diretórios de trabalho
+    local dirs=("$OUTPUT_DIR" "$EVIDENCE_DIR" "$STATS_DIR" "$THREAT_INTEL_DIR")
+    
+    for dir in "${dirs[@]}"; do
+        if mkdir -p "$dir"; then
+            log_success "Diretório criado: $dir"
+        else
+            log_critical "Falha ao criar diretório: $dir"
+            exit 1
+        fi
+    done
+    
+    # Iniciar relatório
+    echo "RELATÓRIO DE ANÁLISE FORENSE - $(date '+%Y-%m-%d %H:%M:%S')" > "${REPORT_FILE}"
+    echo "Arquivo analisado: $LOG_FILE" >> "${REPORT_FILE}"
+    echo "Analisador: $0" >> "${REPORT_FILE}"
+    echo "$DIVIDER" >> "${REPORT_FILE}"
+}
+
+# =============================================================================
+# FUNÇÕES DE ANÁLISE FORENSE
+# =============================================================================
+
+collect_basic_forensics() {
+    log_section "COLETA DE INFORMAÇÕES FORENSES BÁSICAS"
+    
+    local file_hash=$(sha256sum "$LOG_FILE" | cut -d' ' -f1)
+    local file_size=$(du -h "$LOG_FILE" | cut -f1)
+    local modified_time=$(stat -c %y "$LOG_FILE")
+    local inode_info=$(stat -c "Inode: %i | UID: %u | GID: %g" "$LOG_FILE")
+    
+    log_message "Hash SHA256: $file_hash"
+    log_message "Tamanho do arquivo: $file_size"
+    log_message "Data de modificação: $modified_time"
+    log_message "Informações de inode: $inode_info"
+    log_message "Total de entradas: $(wc -l < "$LOG_FILE")"
+    
+    # Salvar informações forenses
+    echo "EVIDÊNCIAS FORENSES BÁSICAS" > "${EVIDENCE_DIR}/basic_forensics.txt"
+    echo "Hash SHA256: $file_hash" >> "${EVIDENCE_DIR}/basic_forensics.txt"
+    echo "Tamanho: $file_size" >> "${EVIDENCE_DIR}/basic_forensics.txt"
+    echo "Modificação: $modified_time" >> "${EVIDENCE_DIR}/basic_forensics.txt"
+    echo "$inode_info" >> "${EVIDENCE_DIR}/basic_forensics.txt"
+}
+
+analyze_temporal_patterns() {
+    log_section "ANÁLISE DE PADRÕES TEMPORAIS"
+    
+    log_subsection "Distribuição por horário"
+    awk -F'[:[]' '{print $2}' "$LOG_FILE" | sort | uniq -c | head -24 > "${STATS_DIR}/hourly_distribution.txt"
+    cat "${STATS_DIR}/hourly_distribution.txt" | tee -a "${REPORT_FILE}"
+    
+    log_subsection "Distribuição por dia"
+    awk -F'[/:]' '{print $1}' "$LOG_FILE" | sort | uniq -c > "${STATS_DIR}/daily_distribution.txt"
+    tail -10 "${STATS_DIR}/daily_distribution.txt" | tee -a "${REPORT_FILE}"
+    
+    # Detectar picos de atividade
+    local peak_hour=$(awk '$1 > 1000 {print $2}' "${STATS_DIR}/hourly_distribution.txt" | head -1)
+    if [[ -n "$peak_hour" ]]; then
+        log_medium "Pico de atividade detectado às $peak_hour horas"
+    fi
+}
+
+analyze_ip_addresses() {
+    log_section "ANÁLISE DE ENDEREÇOS IP"
+    
+    log_subsection "Top 20 IPs por volume de requisições"
+    awk '{print $1}' "$LOG_FILE" | sort | uniq -c | sort -nr | head -20 > "${STATS_DIR}/top_ips.txt"
+    cat "${STATS_DIR}/top_ips.txt" | tee -a "${REPORT_FILE}"
+    
+    log_subsection "IPs únicos totais"
+    local unique_ips=$(awk '{print $1}' "$LOG_FILE" | sort -u | wc -l)
+    log_message "Total de IPs distintos: $unique_ips"
+    
+    # Identificar IPs com padrões suspeitos
+    log_subsection "Padrões de IP suspeitos"
+    awk '{print $1}' "$LOG_FILE" | sort | uniq -c | awk '$1 > 1000 {print $2 " - " $1 " requests"}' > "${EVIDENCE_DIR}/suspicious_ips.txt"
+    
+    if [[ -s "${EVIDENCE_DIR}/suspicious_ips.txt" ]]; then
+        log_high "IPs com volume anormal de requisições:"
+        cat "${EVIDENCE_DIR}/suspicious_ips.txt" | tee -a "${REPORT_FILE}"
+        
+        # Adicionar à lista de ofensores
+        while read -r line; do
+            local ip=$(echo "$line" | awk '{print $1}')
+            local count=$(echo "$line" | awk '{print $3}')
+            TOP_OFFENDERS["$ip"]=$count
+        done < "${EVIDENCE_DIR}/suspicious_ips.txt"
+    else
+        log_success "Nenhum IP com volume excessivo detectado"
+    fi
+}
+
+analyze_http_methods() {
+    log_section "ANÁLISE DE MÉTODOS HTTP"
+    
+    log_subsection "Distribuição de métodos HTTP"
+    awk '{print $6}' "$LOG_FILE" | sed 's/"//g' | sort | uniq -c | sort -nr > "${STATS_DIR}/http_methods.txt"
+    cat "${STATS_DIR}/http_methods.txt" | tee -a "${REPORT_FILE}"
+    
+    # Verificar métodos potencialmente perigosos
+    local dangerous_methods=$(grep -E "(PUT|DELETE|TRACE|CONNECT)" "${STATS_DIR}/http_methods.txt" | awk '{sum += $1} END {print sum}')
+    if [[ $dangerous_methods -gt 0 ]]; then
+        log_high "Métodos HTTP potencialmente perigosos detectados: $dangerous_methods requisições"
+        grep -E "(PUT|DELETE|TRACE|CONNECT)" "${STATS_DIR}/http_methods.txt" | tee -a "${REPORT_FILE}"
+    fi
+}
+
+analyze_status_codes() {
+    log_section "ANÁLISE DE CÓDIGOS DE STATUS HTTP"
+    
+    log_subsection "Distribuição de códigos de status"
+    awk '{print $9}' "$LOG_FILE" | sort | uniq -c | sort -nr > "${STATS_DIR}/status_codes.txt"
+    cat "${STATS_DIR}/status_codes.txt" | tee -a "${REPORT_FILE}"
+    
+    # Analisar códigos de erro
+    local client_errors=$(awk '/ 4[0-9]{2} / {count++} END {print count}' "$LOG_FILE")
+    local server_errors=$(awk '/ 5[0-9]{2} / {count++} END {print count}' "$LOG_FILE")
+    
+    log_message "Erros cliente (4xx): $client_errors"
+    log_message "Erros servidor (5xx): $server_errors"
+    
+    if [[ $server_errors -gt 100 ]]; then
+        log_high "Número elevado de erros de servidor (5xx) detectado"
+    fi
+}
+
+analyze_user_agents() {
+    log_section "ANÁLISE DE USER AGENTS"
+    
+    log_subsection "User Agents mais frequentes"
+    awk -F'"' '{print $6}' "$LOG_FILE" | sort | uniq -c | sort -nr | head -15 > "${STATS_DIR}/user_agents.txt"
+    cat "${STATS_DIR}/user_agents.txt" | tee -a "${REPORT_FILE}"
+    
+    # Detectar user agents de scanners e ferramentas automatizadas
+    log_subsection "User Agents suspeitos"
+    for agent in "${SCANNER_AGENTS[@]}"; do
+        local count=$(grep -ci "$agent" "$LOG_FILE")
+        if [[ $count -gt 0 ]]; then
+            log_high "Scanner detectado: $agent ($count ocorrências)"
+            grep -i "$agent" "$LOG_FILE" | awk '{print $1}' | sort -u >> "${EVIDENCE_DIR}/scanner_ips.txt"
+            ((ATTACK_VECTORS[SCANNING]+=count))
+        fi
+    done
+    
+    # Identificar user agents vazios ou incomuns
+    local empty_agents=$(grep -ci '"-"' "$LOG_FILE")
+    if [[ $empty_agents -gt 0 ]]; then
+        log_medium "User Agents vazios detectados: $empty_agents"
+    fi
+}
+
+detect_sql_injection() {
+    log_subsection "Detecção de Tentativas de SQL Injection"
+    
+    local total_sqli=0
+    for pattern in "${SQL_KEYWORDS[@]}"; do
+        local count=$(grep -ci "$pattern" "$LOG_FILE")
+        if [[ $count -gt 0 ]]; then
+            log_high "Padrão SQLi detectado: $pattern ($count ocorrências)"
+            grep -i "$pattern" "$LOG_FILE" | awk '{print $1}' | sort -u >> "${EVIDENCE_DIR}/sqli_ips.txt"
+            ((total_sqli+=count))
+        fi
+    done
+    
+    if [[ $total_sqli -gt 0 ]]; then
+        ATTACK_VECTORS[SQLi]=$total_sqli
+        log_critical "Total de indicadores de SQL Injection: $total_sqli"
+        # Coletar IPs únicos envolvidos em SQLi
+        sort -u "${EVIDENCE_DIR}/sqli_ips.txt" > "${EVIDENCE_DIR}/unique_sqli_ips.txt"
+        local unique_ips=$(wc -l < "${EVIDENCE_DIR}/unique_sqli_ips.txt")
+        log_high "IPs únicos envolvidos em SQLi: $unique_ips"
+    else
+        log_success "Nenhum indicador de SQL Injection detectado"
+    fi
+}
+
+detect_xss_attempts() {
+    log_subsection "Detecção de Tentativas de XSS"
+    
+    local total_xss=0
+    for pattern in "${XSS_PATTERNS[@]}"; do
+        local count=$(grep -ci "$pattern" "$LOG_FILE")
+        if [[ $count -gt 0 ]]; then
+            log_high "Padrão XSS detectado: $pattern ($count ocorrências)"
+            grep -i "$pattern" "$LOG_FILE" | awk '{print $1}' | sort -u >> "${EVIDENCE_DIR}/xss_ips.txt"
+            ((total_xss+=count))
+        fi
+    done
+    
+    if [[ $total_xss -gt 0 ]]; then
+        ATTACK_VECTORS[XSS]=$total_xss
+        log_critical "Total de indicadores de XSS: $total_xss"
+    else
+        log_success "Nenhum indicador de XSS detectado"
+    fi
+}
+
+detect_lfi_attempts() {
+    log_subsection "Detecção de Tentativas de Local File Inclusion"
+    
+    local total_lfi=0
+    for pattern in "${LFI_INDICATORS[@]}"; do
+        local count=$(grep -ci "$pattern" "$LOG_FILE")
+        if [[ $count -gt 0 ]]; then
+            log_high "Padrão LFI detectado: $pattern ($count ocorrências)"
+            grep -i "$pattern" "$LOG_FILE" | awk '{print $1}' | sort -u >> "${EVIDENCE_DIR}/lfi_ips.txt"
+            ((total_lfi+=count))
+        fi
+    done
+    
+    if [[ $total_lfi -gt 0 ]]; then
+        ATTACK_VECTORS[LFI]=$total_lfi
+        log_critical "Total de indicadores de LFI: $total_lfi"
+    else
+        log_success "Nenhum indicador de LFI detectado"
+    fi
+}
+
+detect_rce_attempts() {
+    log_subsection "Detecção de Tentativas de Remote Code Execution"
+    
+    local total_rce=0
+    for pattern in "${RCE_INDICATORS[@]}"; do
+        local count=$(grep -ci "$pattern" "$LOG_FILE")
+        if [[ $count -gt 0 ]]; then
+            log_high "Padrão RCE detectado: $pattern ($count ocorrências)"
+            grep -i "$pattern" "$LOG_FILE" | awk '{print $1}' | sort -u >> "${EVIDENCE_DIR}/rce_ips.txt"
+            ((total_rce+=count))
+        fi
+    done
+    
+    if [[ $total_rce -gt 0 ]]; then
+        ATTACK_VECTORS[RCE]=$total_rce
+        log_critical "Total de indicadores de RCE: $total_rce"
+    else
+        log_success "Nenhum indicador de RCE detectado"
+    fi
+}
+
+detect_path_traversal() {
+    log_subsection "Detecção de Tentativas de Path Traversal"
+    
+    local total_traversal=$(grep -c "\.\./" "$LOG_FILE")
+    if [[ $total_traversal -gt 0 ]]; then
+        ATTACK_VECTORS[LFI]=$((ATTACK_VECTORS[LFI] + total_traversal))
+        log_high "Tentativas de Path Traversal detectadas: $total_traversal"
+        grep "\.\./" "$LOG_FILE" | awk '{print $1}' | sort -u > "${EVIDENCE_DIR}/traversal_ips.txt"
+    else
+        log_success "Nenhuma tentativa de Path Traversal detectada"
+    fi
+}
+
+analyze_sensitive_paths() {
+    log_subsection "Análise de Acesso a Paths Sensíveis"
+    
+    local total_sensitive=0
+    for path in "${MALICIOUS_PATHS[@]}"; do
+        local count=$(grep -ci "$path" "$LOG_FILE")
+        if [[ $count -gt 0 ]]; then
+            log_medium "Acesso a path sensível: $path ($count ocorrências)"
+            grep -i "$path" "$LOG_FILE" | awk '{print $1,$7,$9}' | sort -u >> "${EVIDENCE_DIR}/sensitive_access.txt"
+            ((total_sensitive+=count))
+        fi
+    done
+    
+    if [[ $total_sensitive -gt 0 ]]; then
+        log_high "Total de acessos a paths sensíveis: $total_sensitive"
+    else
+        log_success "Nenhum acesso a paths sensíveis detectado"
+    fi
+}
+
+generate_threat_intelligence() {
+    log_section "INTELIGÊNCIA DE AMEAÇAS"
+    
+    # Consolidar IPs maliciosos
+    cat "${EVIDENCE_DIR}"/*_ips.txt 2>/dev/null | sort -u > "${THREAT_INTEL_DIR}/malicious_ips.txt"
+    local malicious_ip_count=$(wc -l < "${THREAT_INTEL_DIR}/malicious_ips.txt" 2>/dev/null || echo 0)
+    
+    if [[ $malicious_ip_count -gt 0 ]]; then
+        log_high "IPs maliciosos identificados: $malicious_ip_count"
+        # Gerar lista para bloqueio
+        awk '{print $1 "# Malicious activity detected"}' "${THREAT_INTEL_DIR}/malicious_ips.txt" > \
+            "${THREAT_INTEL_DIR}/ip_blocklist.txt"
+    else
+        log_success "Nenhum IP malicioso identificado"
+    fi
+    
+    # Gerar IOCs
+    echo "Indicators of Compromise (IOCs)" > "${THREAT_INTEL_DIR}/iocs.txt"
+    echo "Generated: $(date)" >> "${THREAT_INTEL_DIR}/iocs.txt"
+    echo "==========================================" >> "${THREAT_INTEL_DIR}/iocs.txt"
+    echo "Malicious IPs: $malicious_ip_count" >> "${THREAT_INTEL_DIR}/iocs.txt"
+    echo "Attack Vectors:" >> "${THREAT_INTEL_DIR}/iocs.txt"
+    for vector in "${!ATTACK_VECTORS[@]}"; do
+        if [[ ${ATTACK_VECTORS[$vector]} -gt 0 ]]; then
+            echo "  $vector: ${ATTACK_VECTORS[$vector]}" >> "${THREAT_INTEL_DIR}/iocs.txt"
+        fi
+    done
+}
+
+generate_executive_summary() {
+    log_section "RELATÓRIO EXECUTIVO"
+    
+    local total_lines=$(wc -l < "$LOG_FILE")
+    local unique_ips=$(awk '{print $1}' "$LOG_FILE" | sort -u | wc -l)
+    local analysis_time=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    echo "RELATÓRIO EXECUTIVO DE SEGURANÇA" | tee -a "${REPORT_FILE}"
+    echo "==========================================" | tee -a "${REPORT_FILE}"
+    echo "Data da análise: $analysis_time" | tee -a "${REPORT_FILE}"
+    echo "Total de entradas analisadas: $total_lines" | tee -a "${REPORT_FILE}"
+    echo "IPs únicos identificados: $unique_ips" | tee -a "${REPORT_FILE}"
+    echo "" | tee -a "${REPORT_FILE}"
+    
+    echo "NÍVEL DE AMEAÇA" | tee -a "${REPORT_FILE}"
+    echo "------------------------------------------" | tee -a "${REPORT_FILE}"
+    echo "Crítico: ${THREAT_LEVELS[CRITICAL]}" | tee -a "${REPORT_FILE}"
+    echo "Alto: ${THREAT_LEVELS[HIGH]}" | tee -a "${REPORT_FILE}"
+    echo "Médio: ${THREAT_LEVELS[MEDIUM]}" | tee -a "${REPORT_FILE}"
+    echo "Baixo: ${THREAT_LEVELS[LOW]}" | tee -a "${REPORT_FILE}"
+    echo "" | tee -a "${REPORT_FILE}"
+    
+    echo "VETORES DE ATAQUE DETECTADOS" | tee -a "${REPORT_FILE}"
+    echo "------------------------------------------" | tee -a "${REPORT_FILE}"
+    for vector in "${!ATTACK_VECTORS[@]}"; do
+        if [[ ${ATTACK_VECTORS[$vector]} -gt 0 ]]; then
+            echo "$vector: ${ATTACK_VECTORS[$vector]}" | tee -a "${REPORT_FILE}"
+        fi
+    done
+    
+    echo "" | tee -a "${REPORT_FILE}"
+    echo "RECOMENDAÇÕES" | tee -a "${REPORT_FILE}"
+    echo "------------------------------------------" | tee -a "${REPORT_FILE}"
+    
+    if [[ ${THREAT_LEVELS[CRITICAL]} -gt 0 ]]; then
+        echo "🔴 Ação imediata requerida: Incidentes críticos detectados" | tee -a "${REPORT_FILE}"
+        echo "   - Revisar logs detalhadamente" | tee -a "${REPORT_FILE}"
+        echo "   - Considerar implementação de bloqueios imediatos" | tee -a "${REPORT_FILE}"
+        echo "   - Notificar equipe de segurança" | tee -a "${REPORT_FILE}"
+    elif [[ ${THREAT_LEVELS[HIGH]} -gt 0 ]]; then
+        echo "🟠 Atenção necessária: Múltiplas ameaças de alto nível detectadas" | tee -a "${REPORT_FILE}"
+        echo "   - Investigar IPs maliciosos" | tee -a "${REPORT_FILE}"
+        echo "   - Reforçar regras de WAF/Firewall" | tee -a "${REPORT_FILE}"
+    elif [[ ${THREAT_LEVELS[MEDIUM]} -gt 0 ]]; then
+        echo "🟡 Monitorar: Atividades suspeitas detectadas" | tee -a "${REPORT_FILE}"
+        echo "   - Acompanhar padrões de tráfego" | tee -a "${REPORT_FILE}"
+        echo "   - Implementar monitoramento adicional" | tee -a "${REPORT_FILE}"
+    else
+        echo "🟢 Situação normal: Nenhuma ameaça significativa detectada" | tee -a "${REPORT_FILE}"
+        echo "   - Manter monitoramento de rotina" | tee -a "${REPORT_FILE}"
+    fi
+    
+    echo "" | tee -a "${REPORT_FILE}"
+    echo "EVIDÊNCIAS E ARTEFATOS" | tee -a "${REPORT_FILE}"
+    echo "------------------------------------------" | tee -a "${REPORT_FILE}"
+    echo "Relatório completo: $REPORT_FILE" | tee -a "${REPORT_FILE}"
+    echo "Evidências detalhadas: $EVIDENCE_DIR" | tee -a "${REPORT_FILE}"
+    echo "Inteligência de ameaças: $THREAT_INTEL_DIR" | tee -a "${REPORT_FILE}"
+    echo "Estatísticas: $STATS_DIR" | tee -a "${REPORT_FILE}"
+}
+
+cleanup_and_exit() {
+    local exit_code=$1
+    
+    # Compactar resultados para arquivamento
+    log_message "Compactando resultados forenses..."
+    tar -czf "${OUTPUT_DIR}.tar.gz" -C "${OUTPUT_DIR}" . 2>/dev/null
+    
+    if [[ $? -eq 0 ]]; then
+        log_success "Análise compactada: ${OUTPUT_DIR}.tar.gz"
+    fi
+    
+    exit $exit_code
+}
+
+main() {
+    echo -e "${BLUE}${BOLD}"
+    echo "=================================================================="
+    echo "ANALISADOR FORENSE - INICIANDO ANÁLISE"
+    echo "=================================================================="
+    echo -e "${NC}"
+    
+    # Validar ambiente
+    validate_environment
+    
+    # Configurar ambiente de análise
+    setup_analysis_environment
+    
+    # Coleta de informações forenses básicas
+    collect_basic_forensics
+    
+    # Análises de padrões
+    analyze_temporal_patterns
+    analyze_ip_addresses
+    analyze_http_methods
+    analyze_status_codes
+    analyze_user_agents
+    
+    # Detecção de ameaças
+    log_section "DETECÇÃO DE AMEAÇAS E ANOMALIAS"
+    detect_sql_injection
+    detect_xss_attempts
+    detect_lfi_attempts
+    detect_rce_attempts
+    detect_path_traversal
+    analyze_sensitive_paths
+    
+    # Inteligência de ameaças
+    generate_threat_intelligence
+    
+    # Relatório executivo
+    generate_executive_summary
+    
+    echo -e "\n${GREEN}${BOLD}"
+    echo "=================================================================="
+    echo "ANÁLISE FORENSE CONCLUÍDA COM SUCESSO"
+    echo "=================================================================="
+    echo -e "${NC}"
+    
+    log_success "Processo de análise finalizado"
+    log_success "Resultados disponíveis em: $OUTPUT_DIR"
+    
+    cleanup_and_exit 0
+}
+
+# Handler para interrupções
+trap 'echo -e "${RED}${BOLD}\nInterrompido pelo usuário. Finalizando...${NC}"; cleanup_and_exit 1' INT TERM
+
+# Executar análise
+main "$@"

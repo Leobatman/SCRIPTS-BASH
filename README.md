@@ -2,7 +2,6 @@
 ![Platform](https://img.shields.io/badge/platform-Linux-black?logo=linux)
 ![Language](https://img.shields.io/badge/language-Bash%20Script-green?logo=gnu-bash)
 ![Focus](https://img.shields.io/badge/focus-Cybersecurity%20%7C%20Forensics-red)
-![License](https://img.shields.io/badge/license-MIT-blue)
 <div align="center">
  <img align="center" height="10000" src="https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExa2g0bjZiMzE0bDJ5anptZ2tjYXVuMWFpeXZybXJuNzZnbm01cTMybCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/12W5Sg2koWYnwA/giphy.gif"  />
 
